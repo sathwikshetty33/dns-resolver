@@ -47,6 +47,7 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 	for i := 0; i < 3; i++ {
 		dnsAnswer, header, err := outgoingDnsQuery(servers, question)
 		if err != nil {
+			fmt.Printf("outgoingDnsQuery error: %s\n", err)
 			return nil, err
 		}
 		parsedAnswers, err := dnsAnswer.AllAnswers()
@@ -54,9 +55,11 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 			return nil, err
 		}
 		if header.Authoritative {
+			fmt.Printf("The Ip is %s", parsedAnswers[0].GoString())
 			return &dnsmessage.Message{
-				Header:  dnsmessage.Header{Response: true},
-				Answers: parsedAnswers,
+				Header:    dnsmessage.Header{Response: true},
+				Questions: []dnsmessage.Question{question},
+				Answers:   parsedAnswers,
 			}, nil
 		}
 		authorities, err := dnsAnswer.AllAuthorities()
@@ -70,17 +73,62 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 				},
 			}, nil
 		}
-		nameServers := []string{}
-		for _, authority := range authorities {
-			fmt.Println("authority:", authority)
-			nameServers = append(nameServers, authority.Body.GoString())
+		nameServers := make([]string, len(authorities))
+		for k, authority := range authorities {
+			if authority.Header.Type == dnsmessage.TypeNS {
+				if ns, ok := authority.Body.(*dnsmessage.NSResource); ok {
+					nameServers[k] = ns.NS.String()
+				}
+			}
+		}
+		additionals, err := dnsAnswer.AllAdditionals()
+		if err != nil {
+			return nil, err
+		}
+		newResolverServers := false
+		var newServers []net.IP
+		for _, additional := range additionals {
+			if additional.Header.Type == dnsmessage.TypeA {
+				for _, nameServer := range nameServers {
+					if additional.Header.Name.String() == nameServer {
+						newResolverServers = true
+						newServers = append(newServers, additional.Body.(*dnsmessage.AResource).A[:])
+					}
+				}
+				if len(newServers) > 0 {
+					return dnsQuery(newServers, question)
+				}
+
+				if !newResolverServers {
+					for _, nameServer := range nameServers {
+						if !newResolverServers {
+							res, err := dnsQuery(getRootServers(), dnsmessage.Question{Name: dnsmessage.MustNewName(nameServer), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET})
+
+							if err != nil {
+								fmt.Println("lookup failed for " + nameServer)
+							} else {
+								newResolverServers = true
+								for _, answer := range res.Answers {
+									if answer.Header.Type == dnsmessage.TypeA {
+										newServers = append(newServers, answer.Body.(*dnsmessage.AResource).A[:])
+									}
+								}
+							}
+						}
+					}
+				}
+				fmt.Println("Ips's Found ", newServers)
+			}
 		}
 	}
 	return &dnsmessage.Message{
 		Header: dnsmessage.Header{
-			RCode: dnsmessage.RCodeServerFailure,
+			RCode:    dnsmessage.RCodeNameError,
+			Response: true,
 		},
+		Questions: []dnsmessage.Question{question},
 	}, nil
+
 }
 
 func getRootServers() []net.IP {
@@ -88,10 +136,13 @@ func getRootServers() []net.IP {
 	if len(rootServers) == 0 {
 		panic("No root servers found")
 	}
-	rootServersSlice := make([]net.IP, len(rootServers))
-	for _, rootServer := range rootServers {
-		rootServersSlice = append(rootServersSlice, net.ParseIP(rootServer))
+	var rootServersSlice []net.IP
+	for _, rootServer := range strings.Split(ROOT_SERVERS, ",") {
+		if ip := net.ParseIP(rootServer); ip != nil {
+			rootServersSlice = append(rootServersSlice, ip)
+		}
 	}
+
 	return rootServersSlice
 }
 func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Parser, *dnsmessage.Header, error) {
@@ -105,6 +156,7 @@ func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessa
 		},
 		Questions: []dnsmessage.Question{question},
 	}
+	fmt.Printf("Querying %s", question.Name.String())
 	buf, err := message.Pack() // Packing the message to bytes so that it can be transmitted over UDP
 	if err != nil {
 		return nil, nil, err
