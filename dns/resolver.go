@@ -46,14 +46,38 @@ func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessa
 	if err != nil {
 		return nil, nil, err
 	}
-	err = conn.Close()
+	err = conn.Close() //Closes the UDP connection after reading the response.
 	if err != nil {
 		return nil, nil, err
 	}
 	var p dnsmessage.Parser
-	headers, err := p.Start(ans[:n])
+	headers, err := p.Start(ans[:n]) // initializes the parser and reads the DNS header and other internal state.
 	if err != nil {
 		return nil, nil, fmt.Errorf("parser start errords:%s", err)
 	}
-	return &p, &headers, nil
+	questions, err := p.AllQuestions()
+	if err != nil {
+		return nil, nil, fmt.Errorf("parser questions errors:%s", err)
+	}
+	if len(message.Questions) != len(questions) {
+		return nil, nil, fmt.Errorf("parser questions length errords:%d", len(questions))
+	}
+	err = p.SkipAllQuestions() // Moves the parsers past questions to next section
+	if err != nil {
+		return nil, nil, fmt.Errorf("parser questions skip errords:%s", err)
+	}
+	return &p, &headers, nil // headers gives you the metadata: response ID, response code, flags (like RecursionAvailable, Authoritative, etc.).
 }
+
+/* DNS Message Structure Reminder
+A DNS message is composed of these sections in this exact order:
+
+Header
+
+Questions (what you're asking)
+
+Answers (the direct answer)
+
+Authority (where to go next)
+
+Additional (helpful info) */
