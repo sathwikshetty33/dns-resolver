@@ -2,18 +2,23 @@ package dns
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
 const ROOT_SERVERS = "198.41.0.4,199.9.14.201,192.33.4.12,199.7.91.13,192.203.230.10,192.5.5.241,192.112.36.4,198.97.190.53"
 
 func HandlePacket(pc net.PacketConn, addr net.Addr, buf []byte) {
+	
 	if err := handlePacket(pc, addr, buf); err != nil {
 		fmt.Printf("handlePacket error: %s\n", err)
 		// Send error response back to client
@@ -39,11 +44,11 @@ func handlePacket(pc net.PacketConn, addr net.Addr, buf []byte) error {
 	if err != nil {
 		return err
 	}
+	
 	question, err := p.Question()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Question: %s\n", question.Name.String())
 
 	res, err := dnsQuery(getRootServers(), question)
 	if err != nil {
@@ -63,7 +68,43 @@ func handlePacket(pc net.PacketConn, addr net.Addr, buf []byte) error {
 func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Message, error) {
 	for i := 0; i < 10; i++ { // Increased iteration limit
 		fmt.Printf("Iteration %d: Querying %s\n", i+1, question.Name.String())
+		fmt.Printf("Question: %s\n", question.Name.String())
+ctx := context.Background()
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_HOST") + ":" + os.Getenv("REDIS_PORT"),
+		Password: "",
+		DB:       0,
+	})
+	defer rdb.Close()
 
+	// Check Redis cache first
+	cached, err := rdb.Get(ctx, question.Name.String()).Result()
+	if err == nil {
+		var ipStrings []string
+		json.Unmarshal([]byte(cached), &ipStrings)
+		var answers []dnsmessage.Resource
+		for _, ipStr := range ipStrings {
+			ip := net.ParseIP(ipStr).To4()
+			if ip == nil {
+				continue
+			}
+			answers = append(answers, dnsmessage.Resource{
+				Header: dnsmessage.ResourceHeader{
+					Name:  question.Name,
+					Type:  dnsmessage.TypeA,
+					Class: dnsmessage.ClassINET,
+					TTL:   600,
+				},
+				Body: &dnsmessage.AResource{A: [4]byte{ip[0], ip[1], ip[2], ip[3]}},
+			})
+		}
+		fmt.Printf("Cache hit: %s -> %v\n", question.Name.String(), ipStrings)
+		return &dnsmessage.Message{
+			Header:    dnsmessage.Header{Response: true, Authoritative: true},
+			Questions: []dnsmessage.Question{question},
+			Answers:   answers,
+		}, nil
+	}
 		dnsAnswer, header, err := outgoingDnsQuery(servers, question)
 		if err != nil {
 			fmt.Printf("outgoingDnsQuery error: %s\n", err)
@@ -91,6 +132,16 @@ func dnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessage.Messa
 		// If we have answers and it's authoritative, we're done
 		if header.Authoritative && len(parsedAnswers) > 0 {
 			fmt.Printf("Authoritative answer found with %d records\n", len(parsedAnswers))
+			// Extract IPs and cache
+	var ipStrs []string
+	for _, ans := range parsedAnswers {
+		if a, ok := ans.Body.(*dnsmessage.AResource); ok {
+			ipStrs = append(ipStrs, net.IP(a.A[:]).String())
+		}
+	}
+	if len(ipStrs) > 0 {
+		cacheSet(rdb, ctx, question.Name.String(), ipStrs)
+	}
 			return &dnsmessage.Message{
 				Header:    dnsmessage.Header{Response: true, Authoritative: true},
 				Questions: []dnsmessage.Question{question},
@@ -295,4 +346,10 @@ func outgoingDnsQuery(servers []net.IP, question dnsmessage.Question) (*dnsmessa
 	}
 
 	return nil, nil, fmt.Errorf("all servers failed, last error: %v", lastErr)
+}
+
+// Store IPs in Redis with TTL
+func cacheSet(rdb *redis.Client, ctx context.Context, key string, ips []string) {
+	data, _ := json.Marshal(ips)
+	rdb.Set(ctx, key, data, 10*time.Minute)
 }
