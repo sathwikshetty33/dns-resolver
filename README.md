@@ -1,6 +1,6 @@
-## A recurrsive DNS Resolver written in Golang.
+# A recurrsive DNS Resolver written in Golang.
 
 
-# Data Flow
+## Data Flow
 
-<img width="912" height="2148" alt="image" src="https://github.com/user-attachments/assets/8487e4b0-95e5-4fa8-8869-0f26c4706590" />
+<img width="1718" height="3279" alt="image" src="https://github.com/user-attachments/assets/2dc4a195-044d-43c9-be4a-2e0bf8ac7ad0" />
